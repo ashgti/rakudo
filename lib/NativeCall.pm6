@@ -339,6 +339,48 @@ my role Native[Routine $r, $libname where Str|Callable|List|IO::Path|Distributio
             my int $idx = nqp::scobjcount($sc);
             nqp::scsetobj($sc, $idx, self);
             my $block := QAST::Block.new(:arity($!arity));
+            my $arglist := QAST::Op.new(:op<list>);
+            my $locals = 0;
+            my @deconts;
+            for $r.signature.params {
+                next if nqp::istype($r, Method) && $_.name // '' eq '%_';
+                my $name = $_.name || '__anonymous_param__' ~ $++;
+                if $_.rw and nqp::objprimspec($_.type) > 0 {
+                    $block.push: QAST::Var.new(
+                        :name($name),
+                        :scope<lexicalref>,
+                        :decl<var>,
+                        :returns($_.type),
+                    );
+                    my $lowered_name = '__lowered_param__' ~ $locals++;
+                    $block.push: QAST::Var.new(
+                        :name($lowered_name),
+                        :scope<local>,
+                        :decl<param>,
+                        QAST::Op.new(
+                            :op<bind>,
+                            QAST::Var.new(:scope<lexicalref>, :name($name)),
+                            QAST::Var.new(:scope<local>, :name($lowered_name)),
+                        ),
+                    );
+                    $arglist.push: QAST::Var.new(:scope<lexicalref>, :name($name));
+                }
+                else {
+                    my $lowered_name = '__lowered_param__' ~ $locals++;
+                    $block.push: QAST::Var.new(
+                        :name($lowered_name),
+                        :scope<local>,
+                        :decl<param>,
+                    );
+                    @deconts.push: QAST::Op.new(
+                        :op<bind>,
+                        QAST::Var.new(:scope<local>, :name($lowered_name)),
+                        QAST::Op.new(:op<decont>, QAST::Var.new(:scope<local>, :name($lowered_name))),
+                    );
+                    $arglist.push: QAST::Var.new(:scope<local>, :name($lowered_name));
+                }
+            }
+            $block.push: nqp::decont($_) for @deconts; # do not interrupt the locals definitions
             my $stmts;
             if $!setup == 2 { # We have JITed code
                 $stmts := QAST::Stmts.new(
@@ -350,45 +392,6 @@ my role Native[Routine $r, $libname where Str|Callable|List|IO::Path|Distributio
                 );
             }
             else {
-                my $arglist := QAST::Op.new(:op<list>);
-                my $locals = 0;
-                for $r.signature.params {
-                    my $name = $_.name || '__anonymous_param__' ~ $++;
-                    if $_.rw and nqp::objprimspec($_.type) > 0 {
-                        $block.push: QAST::Var.new(
-                            :name($name),
-                            :scope<lexicalref>,
-                            :decl<var>,
-                            :returns($_.type),
-                        );
-                        my $lowered_name = '__lowered_param__' ~ $locals++;
-                        $block.push: QAST::Var.new(
-                            :name($lowered_name),
-                            :scope<local>,
-                            :decl<param>,
-                            QAST::Op.new(
-                                :op<bind>,
-                                QAST::Var.new(:scope<lexicalref>, :name($name)),
-                                QAST::Var.new(:scope<local>, :name($lowered_name)),
-                            ),
-                        );
-                        $arglist.push: QAST::Var.new(:scope<lexicalref>, :name($name));
-                    }
-                    else {
-                        $block.push: QAST::Var.new(
-                            :name($name),
-                            :scope<lexical>,
-                            :decl<param>,
-                            :slurpy($_.slurpy ?? 1 !! 0),
-                        );
-                        $arglist.push: nqp::objprimspec($_.type) == 0
-                            ?? QAST::Op.new(
-                                    :op('decont'),
-                                    QAST::Var.new(:scope<lexical>, :name($name)),
-                                )
-                            !! QAST::Var.new(:scope<lexical> :name($name));
-                    }
-                }
                 $stmts := QAST::Stmts.new(
                     QAST::Op.new(
                         :op<nativecallinvoke>,
